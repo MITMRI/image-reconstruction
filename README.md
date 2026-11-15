@@ -10,6 +10,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/noise_report.py results          # tables and figures 1-6
 .venv/bin/python scripts/noise_examples.py --ds006557 path/to/ds006557 --lumc path/to/lumc/v5/Data   # 7, 8
 cd scripts && ../.venv/bin/python degrade_3t.py path/to/ds006557 --out ../results            # 9, 10
+cd scripts && ../.venv/bin/python fake_panel.py path/to/ds006557 --out ../results/figures      # 11
 ```
 
 | module | what it does |
@@ -17,7 +18,7 @@ cd scripts && ../.venv/bin/python degrade_3t.py path/to/ds006557 --out ../result
 | `imrecon.datasets` | T2w scans of both datasets as one list (field, scanner serial, session; age and sex where published) |
 | `imrecon.noise` | head and white-matter masks; noise SD from the Laplacian stencil (one scan) or a registered rescan (two scans); noise spectrum and the smoothing width that fits it; flat patches and background samples |
 | `imrecon.distributions` | which distribution the noise follows: sweep each family's SD, measure surprisal (bits/sample), keep the minimum, compare families on held-out slices. Residual families (Gaussian, Laplace, logistic, Student-t, generalized normal, hyperbolic secant, Cauchy, skew-normal, NIG, Johnson SU), magnitude families (Gaussian, Rician, noncentral chi for 2-8 coils) and background families (Rayleigh, chi, Maxwell, half-normal, exponential, gamma, lognormal) |
-| `imrecon.degrade` | a 3 T scan made 64 mT-like in steps: resampled, + resolution, + contrast, + noise |
+| `imrecon.degrade` | a 3 T scan made 64 mT-like in steps: resampled, + resolution, + contrast (intensity map, physics, physics fitted), + noise |
 
 Data stay in a local cache; scripts write numbers to `results/` (not committed). Figures 7 and 9 show a person's
 scans and must never be committed or shared outside the team.
@@ -83,31 +84,34 @@ datasets), and by 10 % in the same people on the same protocol (…45 vs …41, 
 (rescan) to / 18 (Laplacian), × about 1.2 toward the top of the slab and 1.3 in CSF, ± 10–30 % per scanner;
 gamma-like air where it is not masked.
 
-## 3 T to 64 mT (`scripts/degrade_3t.py`, 23 people)
+## 3 T to 64 mT (`scripts/degrade_3t.py`, `scripts/fake_panel.py`; 23 people)
 
-Each person's 3 T scan is degraded onto scanner C's grid, with contrast learned from scanner E's scan of the same
-person, and compared with scanner C's scan, which the degrader never sees. Yardstick: real minus rescan (two noises
-plus registration). Ratio = SD(real − fake) / SD(real − rescan); 1 means as close as a rescan.
+Each person's 3 T scan is degraded onto scanner C's grid and compared with scanner C's scan, which the degrader never
+sees; anything learned comes from scanner E's scan of the same person. Yardstick: real minus rescan (two noises plus
+registration). Ratio = SD(real − fake) / SD(real − rescan); 1 means as close as a rescan.
 
-| step | white matter | whole brain |
-|---|---|---|
-| 0 resampled | 1.21 | 1.94 |
-| 1 + resolution (in-plane Gaussian, 5 mm slab box) | 1.16 | 1.83 |
-| 2 + contrast (paired tissue-class means) | 1.18 | 1.72 |
-| 3 + noise model | 1.44 | 1.87 |
+| step | white matter | whole brain | brightest quarter: real − fake |
+|---|---|---|---|
+| 0 resampled | 1.21 | 1.95 | +152 % of WM |
+| 1 + resolution (in-plane Gaussian, 5 mm slab box) | 1.16 | 1.84 | +156 % |
+| 2a + contrast: intensity map (paired class means) | 1.15 | 1.70 | +125 % |
+| 2b + contrast: physics, 50 mT table | 1.09 | 1.88 | +166 % |
+| 2c + contrast: physics, signals fitted to scanner E | 1.12 | 1.81 | +122 % |
+| 3 + noise model (on 2c) | 1.34 | 1.91 | +122 % |
 
-- **The noise matches.** The fake's Laplacian SNR is 17.7 against the real 18.0; its spectrum is smoothed by
-  0.68 px against 0.58 px.
-- **The signal does not, yet.** Even before noise is added (step 2), the fake differs from the real scan by more
-  than one scan's worth of noise. The fake correlates 0.56 with the real scan in the brain, the rescan 0.94. CSF is
-  still too dark (mean real − fake +99 % of white matter in the brightest quarter): 64 mT T2w (TE 161 ms) makes CSF
-  4.7 times white matter, 3 T CUBE about 2.2, and partial volume at the cortex does not carry over through one
-  intensity map. The real 64 mT images also look sharper than a 5 mm box blur predicts.
+- **The noise matches**: the fake's Laplacian SNR is 20 against the real 18, and its spectrum is smoothed by 0.70 px
+  against 0.58.
+- **Physics contrast**: tissue fractions from the 1 mm 3 T scan, a 64 mT spin-echo signal per tissue (TR 2 s, TE
+  161 ms), then the blur, so partial volume mixes 64 mT signals. With the 50 mT literature T1/T2 it gives grey matter
+  1.19 and CSF 2.61 times white matter; fitted to the person's other 64 mT scan the signals are 1.40 and 4.46. The
+  literature values fit white matter best (1.09) but undersell CSF.
+- **What is still missing, in the brightest tissue** (CSF and cortex): the fake is far too dark there in every
+  version. Less blur makes it worse, not better (brain ratio 1.80 → 1.93 from a full to no in-plane blur), so it is
+  not the blur. Likely causes, visible in `11_fake_panel.png`: the 3 T CUBE scan is fat-suppressed (its scalp is
+  dark; 64 mT's is bright), sulcal CSF is far brighter at 64 mT than three tissue classes from 3 T predict, and the
+  64 mT ventricles look wider than the 3 T ones in the same 5 mm slab.
 - Contrast maps tried and dropped: a voxel-wise lookup (pulled toward the mean), quantile matching (copies the
   noise-widened 64 mT histogram), and class means paired by rank (a vessel class at 3 T shifts the pairing).
-
-Next: contrast from physics (64 mT T1/T2 per tissue with Hyperfine's TR and TE, as lowfield-sim does) instead of an
-intensity map, and the measured 64 mT point-spread function instead of a box.
 
 ## Limits
 

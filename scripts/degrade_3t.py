@@ -3,7 +3,8 @@
     python scripts/degrade_3t.py path/to/ds006557 [--out results] [--show sub-HYPE01]
 
 Per ds006557 person, the 3 T scan is moved onto scanner C's grid and degraded in steps (resampled; + resolution;
-+ contrast learned from scanner E's scan of the same person; + noise), and each step is compared with scanner C's real
++ contrast, three ways: an intensity map, physics from the 50 mT tissue table, physics fitted to scanner E's scan of
+the same person; + noise), and each step is compared with scanner C's real
 scan, which the degrader never sees. Scanner E's scan, registered onto C, is the yardstick: real minus rescan holds two
 noises plus registration error, so a perfect fake would differ from the real scan by the same amount.
 
@@ -45,8 +46,9 @@ def person(by, keep=None):
     t, _ = G.register_transform(c, e)
     rescan = G.resample(e, c, t)
     rescan *= real[wm].mean() / rescan[wm].mean()
-    fakes, dice = G.stages(g, c, e, wm, seed=0)
-    row = {"head_dice": dice, "fake_corr": np.corrcoef(real[brain], fakes[G.STAGES[2]][brain])[0, 1],
+    fakes, dice, fitted = G.stages(g, c, e, wm, seed=0)
+    row = {"head_dice": dice, "fake_corr": np.corrcoef(real[brain], fakes[G.STAGES[4]][brain])[0, 1],
+           **{f"fitted_{k}_over_wm": v for k, v in fitted.items()},
            "rescan_corr": np.corrcoef(real[brain], rescan[brain])[0, 1], "wm_signal": cls[0]}
     d_rescan = real - rescan
     q = np.quantile(rescan[brain], [0.25, 0.5, 0.75])    # quarters by the rescan: its noise is independent of
@@ -79,10 +81,11 @@ def fig_person(sid, k, out, plt):
     vmax = np.percentile(k["real"][k["wm"]], 99) * 3
     lim = 4 * N.robust_sd((k["real"] - k["rescan"])[k["wm"]])
     fig, ax = plt.subplots(2, 5, figsize=(17, 8))
+    show = (G.STAGES[1], G.STAGES[2], G.STAGES[3], G.STAGES[5])
     top = [(k["real"], "real 64 mT (scanner C)"), (k["rescan"], "rescan (scanner E, registered)")] + \
-          [(k["fakes"][s], f"fake: {s}") for s in G.STAGES[1:]]
+          [(k["fakes"][s], f"fake {s}") for s in (G.STAGES[2], G.STAGES[3], G.STAGES[5])]
     bottom = [(k["real"] - k["rescan"], "real - rescan: the target")] + \
-             [(k["real"] - k["fakes"][s], f"real - fake {s}") for s in G.STAGES]
+             [(k["real"] - k["fakes"][s], f"real - fake {s}") for s in show]
     for a, (im, title) in zip(ax[0], top):
         a.imshow(np.rot90(im[:, :, z]), cmap="gray", vmin=0, vmax=vmax)
         a.set_title(title, fontsize=8.5, loc="left")
@@ -108,16 +111,19 @@ def fig_summary(rows, out, plt):
             ax[0].scatter(x, v, s=16, color=col, edgecolor=SURFACE, linewidth=0.8, label=name if i == 0 else None)
             ax[0].plot([i + (j - 0.5) * 0.3 - 0.1, i + (j - 0.5) * 0.3 + 0.1], [np.median(v)] * 2, color=INK2, lw=2)
     ax[0].axhline(1, color=MUTED, lw=1, ls="--")
-    ax[0].text(3.45, 1.03, "matched", color=MUTED, fontsize=8, ha="right")
-    ax[0].set_xticks(range(len(G.STAGES)), G.STAGES)
+    ax[0].text(len(G.STAGES) - 0.55, 1.03, "matched", color=MUTED, fontsize=8, ha="right")
+    ax[0].set_xticks(range(len(G.STAGES)), [st.replace(": ", ":\n") for st in G.STAGES], fontsize=8)
     ax[0].set_ylabel("SD(real - fake) / SD(real - rescan)")
     ax[0].set_yscale("log")
+    from noise_report import plain_log
+    plain_log(ax[0], "y", [0.8, 1, 1.5, 2, 3, 4])
     ax[0].set_title("How far each step gets (1 = as close as a rescan)", loc="left")
     ax[0].legend(fontsize=8)
     ax[0].grid(axis="x", visible=False)
-    for i, st in enumerate(G.STAGES[1:3]):
+    from noise_report import AQUA
+    for i, st in enumerate((G.STAGES[1], G.STAGES[2], G.STAGES[3], G.STAGES[4])):
         med = [np.median(g(f"bias_{st}_{n}")) * 100 for n in QUARTERS]
-        ax[1].plot(range(4), med, marker="o", ms=5, color=(MUTED, ORANGE)[i], label=f"fake {st}")
+        ax[1].plot(range(4), med, marker="o", ms=5, color=(MUTED, "#c9c8c2", AQUA, ORANGE)[i], label=f"fake {st}")
     med = [np.median(g(f"bias_rescan_{n}")) * 100 for n in QUARTERS]
     ax[1].plot(range(4), med, marker="o", ms=5, color=BLUE, label="rescan (the target)")
     ax[1].axhline(0, color=MUTED, lw=1, ls=":")
@@ -167,6 +173,9 @@ def main(argv=None):
               f"bias by quarter (% WM) " + ", ".join(f"{np.median(g(f'bias_{st}_{n}')) * 100:+.0f}" for n in QUARTERS))
     print(f"  {'rescan':16s} bias by quarter (% WM) " + ", ".join(
         f"{np.median(g(f'bias_rescan_{n}')) * 100:+.0f}" for n in QUARTERS))
+    print("  fitted 64 mT signal / white matter: " + ", ".join(
+        f"{k} {np.median(g(f'fitted_{k}_over_wm')):.2f}" for k in ("gm", "csf"))
+          + "; literature: " + ", ".join(f"{k} {G.spin_echo(k) / G.spin_echo('wm'):.2f}" for k in ("gm", "csf")))
     print(f"  brain correlation with the real scan: rescan {med(g('rescan_corr'))}, fake {med(g('fake_corr'))}")
     print(f"  Laplacian SNR: real {med(g('snr_lap_real'))}, fake {med(g('snr_lap_fake'))}")
     print(f"  spectrum smoothing (px): real - rescan {med(g('smoothing_rescan'))}, real - fake {med(g('smoothing_fake'))}")
