@@ -2,7 +2,8 @@
 
     python scripts/fake_panel.py path/to/ds006557 [--subject sub-HYPE01] [--out results/figures]
 
-The fake is imrecon.degrade's last stage (resolution, contrast fitted to the person's other 64 mT scan, noise). A
+The fake is imrecon.degrade's last stage (resolution; contrast from the person's other 64 mT scan, with SynthSeg or
+T1w tissue labels when given; noise). A
 fifth panel shows real minus rescan, the size a perfect fake's difference would have. Writes 11_fake_panel.png; it
 shows a person's scans, so it is never committed.
 """
@@ -30,13 +31,17 @@ def main(argv=None):
     ap.add_argument("root")
     ap.add_argument("--subject", default="sub-HYPE01")
     ap.add_argument("--out", default="results/figures")
+    ap.add_argument("--synthseg", help="folder of mri_synthseg label maps for the 3 T T2w scans")
     args = ap.parse_args(argv)
     by = {s["session"]: s for s in DS.ds006557(args.root) if s["subject"] == args.subject}
     c, e, g = (sitk.ReadImage(str(by[k]["path"]), sitk.sitkFloat32) for k in ("HFC", "HFE", "GE"))
     real = N.to_array(c)
     brain, wm, _ = N.white_matter(real, c.GetSpacing())
     t1 = Path(str(by["GE"]["path"]).replace("_ses-GE_T2w", "_ses-GE_acq-MPRAGE_T1w"))
-    fakes, _, _ = G.stages(g, c, e, wm, seed=0, t1=sitk.ReadImage(str(t1), sitk.sitkFloat32) if t1.is_file() else None)
+    seg = Path(args.synthseg) / Path(str(by["GE"]["path"])).name.replace("_T2w.nii.gz", "_synthseg.nii.gz") \
+        if args.synthseg else None
+    fakes, _, _ = G.stages(g, c, e, wm, seed=0, t1=sitk.ReadImage(str(t1), sitk.sitkFloat32) if t1.is_file() else None,
+                           seg=sitk.ReadImage(str(seg)) if seg and seg.is_file() else None)
     fake = fakes[G.STAGES[-1]]
     three = fakes[G.STAGES[0]]                                   # 3 T on the 64 mT grid, no blur
     t, _ = G.register_transform(c, e)

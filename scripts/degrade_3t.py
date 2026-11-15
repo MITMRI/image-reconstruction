@@ -31,6 +31,7 @@ from imrecon import datasets as DS  # noqa: E402
 from imrecon import degrade as G  # noqa: E402
 from imrecon import noise as N  # noqa: E402
 
+SEG_DIR = None                                       # --synthseg: folder of mri_synthseg label maps
 QUARTERS = ("darkest (WM)", "2nd", "3rd", "brightest (CSF)")
 
 
@@ -47,8 +48,10 @@ def person(by, keep=None):
     rescan = G.resample(e, c, t)
     rescan *= real[wm].mean() / rescan[wm].mean()
     t1 = Path(str(by["GE"]["path"]).replace("_ses-GE_T2w", "_ses-GE_acq-MPRAGE_T1w"))
-    fakes, dice, fitted = G.stages(g, c, e, wm, seed=0, t1=load(t1) if t1.is_file() else None)
-    row = {"head_dice": dice, "fake_corr": np.corrcoef(real[brain], fakes[G.STAGES[-2] if G.STAGES[-2] in fakes else G.STAGES[4]][brain])[0, 1],
+    seg = Path(SEG_DIR) / Path(str(by["GE"]["path"])).name.replace("_T2w.nii.gz", "_synthseg.nii.gz") if SEG_DIR else None
+    fakes, dice, fitted = G.stages(g, c, e, wm, seed=0, t1=load(t1) if t1.is_file() else None,
+                                   seg=load(seg) if seg and seg.is_file() else None)
+    row = {"head_dice": dice, "fake_corr": np.corrcoef(real[brain], fakes[[st for st in G.STAGES[:-1] if st in fakes][-1]][brain])[0, 1],
            **{f"fitted_{k}_over_wm": v for k, v in fitted.items()},
            "rescan_corr": np.corrcoef(real[brain], rescan[brain])[0, 1], "wm_signal": cls[0]}
     d_rescan = real - rescan
@@ -82,9 +85,9 @@ def fig_person(sid, k, out, plt):
     vmax = np.percentile(k["real"][k["wm"]], 99) * 3
     lim = 4 * N.robust_sd((k["real"] - k["rescan"])[k["wm"]])
     fig, ax = plt.subplots(2, 5, figsize=(17, 8))
-    show = (G.STAGES[1], G.STAGES[4], G.STAGES[5], G.STAGES[6])
+    show = [st for st in (G.STAGES[1], G.STAGES[4], G.STAGES[5], G.STAGES[6], G.STAGES[7]) if st in k["fakes"]][-4:]
     top = [(k["real"], "real 64 mT (scanner C)"), (k["rescan"], "rescan (scanner E, registered)")] + \
-          [(k["fakes"][s], f"fake {s}") for s in (G.STAGES[4], G.STAGES[5], G.STAGES[6])]
+          [(k["fakes"][s], f"fake {s}") for s in show[1:]]
     bottom = [(k["real"] - k["rescan"], "real - rescan: the target")] + \
              [(k["real"] - k["fakes"][s], f"real - fake {s}") for s in show]
     for a, (im, title) in zip(ax[0], top):
@@ -104,16 +107,17 @@ def fig_person(sid, k, out, plt):
 def fig_summary(rows, out, plt):
     from noise_report import BLUE, INK2, MUTED, ORANGE, SURFACE
     g = lambda k: np.array([r[k] for r in rows], float)
-    fig, ax = plt.subplots(1, 2, figsize=(14, 4.6), gridspec_kw={"width_ratios": [1.1, 1]})
+    stages = [st for st in G.STAGES if f"ratio_{st}_wm" in rows[0]]
+    fig, ax = plt.subplots(1, 2, figsize=(15, 4.6), gridspec_kw={"width_ratios": [1.1, 1]})
     for j, (region, col, name) in enumerate((("wm", ORANGE, "white matter"), ("brain", BLUE, "whole brain"))):
-        for i, st in enumerate(G.STAGES):
+        for i, st in enumerate(stages):
             v = g(f"ratio_{st}_{region}")
             x = i + (j - 0.5) * 0.3 + (np.random.default_rng(i).random(len(v)) - 0.5) * 0.12
             ax[0].scatter(x, v, s=16, color=col, edgecolor=SURFACE, linewidth=0.8, label=name if i == 0 else None)
             ax[0].plot([i + (j - 0.5) * 0.3 - 0.1, i + (j - 0.5) * 0.3 + 0.1], [np.median(v)] * 2, color=INK2, lw=2)
     ax[0].axhline(1, color=MUTED, lw=1, ls="--")
-    ax[0].text(len(G.STAGES) - 0.55, 1.03, "matched", color=MUTED, fontsize=8, ha="right")
-    ax[0].set_xticks(range(len(G.STAGES)), [st.replace(": ", ":\n") for st in G.STAGES], fontsize=8)
+    ax[0].text(len(stages) - 0.55, 1.03, "matched", color=MUTED, fontsize=8, ha="right")
+    ax[0].set_xticks(range(len(stages)), [st.replace(": ", ":\n") for st in stages], fontsize=8)
     ax[0].set_ylabel("SD(real - fake) / SD(real - rescan)")
     ax[0].set_yscale("log")
     from noise_report import plain_log
@@ -122,9 +126,9 @@ def fig_summary(rows, out, plt):
     ax[0].legend(fontsize=8)
     ax[0].grid(axis="x", visible=False)
     from noise_report import AQUA
-    for i, st in enumerate((G.STAGES[1], G.STAGES[3], G.STAGES[4], G.STAGES[5])):
+    for i, st in enumerate([st for st in (G.STAGES[3], G.STAGES[4], G.STAGES[5], G.STAGES[6]) if f"bias_{st}_{QUARTERS[0]}" in rows[0]]):
         med = [np.median(g(f"bias_{st}_{n}")) * 100 for n in QUARTERS]
-        ax[1].plot(range(4), med, marker="o", ms=5, color=(MUTED, "#c9c8c2", AQUA, ORANGE)[i], label=f"fake {st}")
+        ax[1].plot(range(4), med, marker="o", ms=5, color=("#c9c8c2", MUTED, AQUA, ORANGE)[i], label=f"fake {st}")
     med = [np.median(g(f"bias_rescan_{n}")) * 100 for n in QUARTERS]
     ax[1].plot(range(4), med, marker="o", ms=5, color=BLUE, label="rescan (the target)")
     ax[1].axhline(0, color=MUTED, lw=1, ls=":")
@@ -147,7 +151,10 @@ def main(argv=None):
     ap.add_argument("--out", default="results")
     ap.add_argument("--show", default="sub-HYPE01")
     ap.add_argument("--subjects", nargs="*", help="only these (default: all)")
+    ap.add_argument("--synthseg", help="folder of <name>_synthseg.nii.gz label maps for the 3 T T2w scans")
     args = ap.parse_args(argv)
+    global SEG_DIR
+    SEG_DIR = args.synthseg
     scans = DS.ds006557(args.root)
     out = Path(args.out)
     (out / "figures").mkdir(parents=True, exist_ok=True)
@@ -161,8 +168,8 @@ def main(argv=None):
         if keep:
             fig_person(sid, keep, out / "figures", plt)
         print(f"{sid}: Dice {r['head_dice']:.3f}, brain r fake {r['fake_corr']:.2f} rescan {r['rescan_corr']:.2f} | WM ratio " + " ".join(
-            f"{r[f'ratio_{s}_wm']:.2f}" for s in G.STAGES) + " | brain " + " ".join(
-            f"{r[f'ratio_{s}_brain']:.2f}" for s in G.STAGES), flush=True)
+            f"{r[f'ratio_{s}_wm']:.2f}" for s in G.STAGES if f"ratio_{s}_wm" in r) + " | brain " + " ".join(
+            f"{r[f'ratio_{s}_brain']:.2f}" for s in G.STAGES if f"ratio_{s}_brain" in r), flush=True)
     with open(out / "degrade.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
@@ -170,7 +177,7 @@ def main(argv=None):
     g = lambda k: np.array([r[k] for r in rows], float)
     med = lambda v: f"{np.median(v):.2f} [{np.percentile(v, 25):.2f}-{np.percentile(v, 75):.2f}]"
     print(f"\n{len(rows)} people, median [quartiles]; SD(real - fake) / SD(real - rescan):")
-    for st in G.STAGES:
+    for st in [st for st in G.STAGES if f"ratio_{st}_wm" in rows[0]]:
         print(f"  {st:16s} white matter {med(g(f'ratio_{st}_wm'))}   brain {med(g(f'ratio_{st}_brain'))}   "
               f"bias by quarter (% WM) " + ", ".join(f"{np.median(g(f'bias_{st}_{n}')) * 100:+.0f}" for n in QUARTERS))
     print(f"  {'rescan':16s} bias by quarter (% WM) " + ", ".join(

@@ -9,8 +9,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/field_noise.py --ds006557 path/to/ds006557 --lumc path/to/lumc/v5/Data   # ~10 min
 .venv/bin/python scripts/noise_report.py results          # tables and figures 1-6
 .venv/bin/python scripts/noise_examples.py --ds006557 path/to/ds006557 --lumc path/to/lumc/v5/Data   # 7, 8
-cd scripts && ../.venv/bin/python degrade_3t.py path/to/ds006557 --out ../results            # 9, 10
-cd scripts && ../.venv/bin/python fake_panel.py path/to/ds006557 --out ../results/figures      # 11
+cd scripts && ../.venv/bin/python degrade_3t.py path/to/ds006557 --out ../results [--synthseg path/to/labels]   # 9, 10
+cd scripts && ../.venv/bin/python fake_panel.py path/to/ds006557 --out ../results/figures [--synthseg path/to/labels]  # 11
 ```
 
 | module | what it does |
@@ -18,7 +18,7 @@ cd scripts && ../.venv/bin/python fake_panel.py path/to/ds006557 --out ../result
 | `imrecon.datasets` | T2w scans of both datasets as one list (field, scanner serial, session; age and sex where published) |
 | `imrecon.noise` | head and white-matter masks; noise SD from the Laplacian stencil (one scan) or a registered rescan (two scans); noise spectrum and the smoothing width that fits it; flat patches and background samples |
 | `imrecon.distributions` | which distribution the noise follows: sweep each family's SD, measure surprisal (bits/sample), keep the minimum, compare families on held-out slices. Residual families (Gaussian, Laplace, logistic, Student-t, generalized normal, hyperbolic secant, Cauchy, skew-normal, NIG, Johnson SU), magnitude families (Gaussian, Rician, noncentral chi for 2-8 coils) and background families (Rayleigh, chi, Maxwell, half-normal, exponential, gamma, lognormal) |
-| `imrecon.degrade` | a 3 T scan made 64 mT-like in steps: resampled, + resolution, + contrast (intensity map, physics, tissue signals from another 64 mT scan, optionally with T1w tissue labels), + noise |
+| `imrecon.degrade` | a 3 T scan made 64 mT-like in steps: resampled, + resolution, + contrast (intensity map, physics, tissue signals from another 64 mT scan, optionally with T1w or SynthSeg tissue labels), + noise |
 
 Data stay in a local cache; scripts write numbers to `results/` (not committed). Figures 7 and 9 show a person's
 scans and must never be committed or shared outside the team.
@@ -98,7 +98,8 @@ registration). Ratio = SD(real − fake) / SD(real − rescan); 1 means as close
 | 2b + contrast: physics, 50 mT table | 1.08 | 1.83 | +164 % |
 | 2c + contrast: physics, tissue signals from scanner E | 1.28 | 1.76 | +117 % |
 | 2d + contrast: as 2c, tissue labels from the 3 T T1w | 1.37 | 1.66 | +108 % |
-| 3 + noise model (Student-t ν = 10, on 2d) | 1.54 | 1.75 | +108 % |
+| 2e + contrast: as 2c, tissue labels from SynthSeg on the 3 T T2w alone | 1.53 | 1.75 | +82 % |
+| 3 + noise model (Student-t ν = 10, on 2e) | 1.73 | 1.85 | +82 % |
 
 - **The noise matches**: the best-fit family (Student-t, ν = 10), SD from the rescans, smoothed 0.6 px. The fake's
   Laplacian SNR is 20 against the real 18, its spectrum smoothed by 0.70 px against 0.58.
@@ -112,8 +113,12 @@ registration). Ratio = SD(real − fake) / SD(real − rescan); 1 means as close
   27 % too dark there in one person). Tissue labels from the 3 T T1w (same session; resampled in scanner coordinates,
   not registered) fix much of it: the fake's correlation with the real scan in the brain rises from 0.60 to 0.65
   (rescan 0.94) and the whole-brain ratio from 1.76 to 1.66, though white matter gets worse (1.28 to 1.37). The T1w
-  only labels tissue; the output is still a 64 mT T2w. For a pipeline from one high-field scan of any contrast, the
-  labels should come from a contrast-agnostic segmenter (SynthSeg) instead. Shifting the fake along the slab confirmed
+  only labels tissue; the output is still a 64 mT T2w.
+- **One high-field scan is enough with SynthSeg** (FreeSurfer 8 `mri_synthseg --robust`, run on the ORCD cluster's
+  container; labels in a local cache, not in the repo). Labels from the 3 T T2w alone give the best CSF so far
+  (brightest-quarter error +82 % of white matter, against +108 % with T1w labels) and the highest correlation with
+  the real scan (0.67; rescan 0.94), at a cost in white matter (1.53 against 1.37), where one-hot labels give every
+  white-matter voxel the same signal. Shifting the fake along the slab confirmed
   the 3 T to 64 mT registration (best match at 0 to +2 mm).
 - **What is still missing, in the brightest tissue** (CSF and cortex): the fake is far too dark there in every
   version. Less blur makes it worse, not better (brain ratio 1.80 → 1.93 from a full to no in-plane blur), so it is
