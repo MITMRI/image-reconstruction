@@ -44,17 +44,20 @@ def head_mask(x, axis=2):
 
 def white_matter(x, voxel_mm, depth_mm=15.0):
     """(brain, wm, class means): brain is the head more than depth_mm from its surface (past scalp and skull); its
-    voxels split into three intensity classes by k-means, and on T2w the darkest is white matter. The WM mask is
-    eroded by one voxel so it stays off tissue edges."""
+    voxels split into four intensity classes by k-means, and on T2w white matter is the darkest class holding at
+    least a tenth of the brain (a small darker class is air, bone or flow void left inside the mask). The WM mask is
+    eroded by one voxel so it stays off tissue edges. The first class mean returned is white matter's."""
     brain = ndi.distance_transform_edt(head_mask(x), sampling=voxel_mm) > depth_mm
     v = x[brain]
-    c = np.percentile(v, [20, 50, 90])
+    c = np.percentile(v, [5, 25, 55, 90])
     for _ in range(50):
         lab = np.argmin(np.abs(v[:, None] - c[None]), 1)
-        c = np.array([v[lab == k].mean() for k in range(3)])
+        c = np.array([v[lab == k].mean() if np.any(lab == k) else c[k] for k in range(4)])
+    share = np.bincount(lab, minlength=4) / len(v)
+    k = min((i for i in range(4) if share[i] >= 0.1), key=lambda i: c[i])
     wm = np.zeros_like(brain)
-    wm[brain] = lab == 0
-    return brain, ndi.binary_erosion(wm), c
+    wm[brain] = lab == k
+    return brain, ndi.binary_erosion(wm), np.concatenate([[c[k]], np.delete(c, k)])
 
 
 LAPLACIAN = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], float)
@@ -156,3 +159,31 @@ def fit_smoothing(rel, edges=None):
     model = lambda s: -(2 * np.pi * s) ** 2 * (f[use] ** 2 - ref ** 2)
     err = [np.sum((np.log(np.maximum(rel[use], 1e-6)) - model(s)) ** 2) for s in widths]
     return float(widths[int(np.argmin(err))])
+
+
+def flat_patches(x, mask, axis=2, k=3, keep=0.25):
+    """Raw magnitudes of k x k in-plane patches wholly inside mask, the `keep` share with the smallest local
+    gradient: (patches (n, k*k), slice index (n,)). Each patch is close to one true signal plus noise, which is what
+    the magnitude families in distributions need."""
+    x, mask = np.moveaxis(x, axis, -1), np.moveaxis(mask, axis, -1)
+    sm = ndi.gaussian_filter(x, (1.0, 1.0, 0))
+    grad = np.hypot(ndi.sobel(sm, 0), ndi.sobel(sm, 1))
+    h, w, n = (x.shape[0] // k) * k, (x.shape[1] // k) * k, x.shape[2]
+    block = lambda a: a[:h, :w].reshape(h // k, k, w // k, k, n).transpose(0, 2, 4, 1, 3).reshape(-1, k * k)
+    p, m, g = block(x), block(mask).all(1), block(grad).mean(1)
+    sl = np.broadcast_to(np.arange(n), (h // k, w // k, n)).ravel()
+    p, g, sl = p[m], g[m], sl[m]
+    if not len(p):
+        return np.zeros((0, k * k)), np.zeros(0, int)
+    sel = g <= np.quantile(g, keep)
+    return p[sel], sl[sel]
+
+
+def background(x, voxel_mm, axis=2, margin_mm=10.0):
+    """(values, slice index) of the air: more than margin_mm outside the head, excluding exact zeros (vendor
+    masking) and the first and last two slices along `axis` (fold-over and slab edges)."""
+    out = ndi.distance_transform_edt(~head_mask(x, axis), sampling=voxel_mm) > margin_mm
+    out = np.moveaxis(out & (x != 0), axis, -1)
+    out[..., :2] = out[..., -2:] = False
+    xs = np.moveaxis(x, axis, -1)
+    return xs[out], np.nonzero(out)[2]

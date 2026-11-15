@@ -5,3 +5,4 @@ results/
 *.nii
 *.nii.gz
 *.h5
+*.log
