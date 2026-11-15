@@ -3,8 +3,8 @@
     python scripts/degrade_3t.py path/to/ds006557 [--out results] [--show sub-HYPE01]
 
 Per ds006557 person, the 3 T scan is moved onto scanner C's grid and degraded in steps (resampled; + resolution;
-+ contrast, three ways: an intensity map, physics from the 50 mT tissue table, physics fitted to scanner E's scan of
-the same person; + noise), and each step is compared with scanner C's real
++ contrast, four ways: an intensity map, physics from the 50 mT tissue table, tissue signals from scanner E's scan of
+the same person, and the same with tissue labels from the 3 T T1w; + noise), and each step is compared with scanner C's real
 scan, which the degrader never sees. Scanner E's scan, registered onto C, is the yardstick: real minus rescan holds two
 noises plus registration error, so a perfect fake would differ from the real scan by the same amount.
 
@@ -46,8 +46,9 @@ def person(by, keep=None):
     t, _ = G.register_transform(c, e)
     rescan = G.resample(e, c, t)
     rescan *= real[wm].mean() / rescan[wm].mean()
-    fakes, dice, fitted = G.stages(g, c, e, wm, seed=0)
-    row = {"head_dice": dice, "fake_corr": np.corrcoef(real[brain], fakes[G.STAGES[4]][brain])[0, 1],
+    t1 = Path(str(by["GE"]["path"]).replace("_ses-GE_T2w", "_ses-GE_acq-MPRAGE_T1w"))
+    fakes, dice, fitted = G.stages(g, c, e, wm, seed=0, t1=load(t1) if t1.is_file() else None)
+    row = {"head_dice": dice, "fake_corr": np.corrcoef(real[brain], fakes[G.STAGES[-2] if G.STAGES[-2] in fakes else G.STAGES[4]][brain])[0, 1],
            **{f"fitted_{k}_over_wm": v for k, v in fitted.items()},
            "rescan_corr": np.corrcoef(real[brain], rescan[brain])[0, 1], "wm_signal": cls[0]}
     d_rescan = real - rescan
@@ -81,9 +82,9 @@ def fig_person(sid, k, out, plt):
     vmax = np.percentile(k["real"][k["wm"]], 99) * 3
     lim = 4 * N.robust_sd((k["real"] - k["rescan"])[k["wm"]])
     fig, ax = plt.subplots(2, 5, figsize=(17, 8))
-    show = (G.STAGES[1], G.STAGES[2], G.STAGES[3], G.STAGES[5])
+    show = (G.STAGES[1], G.STAGES[4], G.STAGES[5], G.STAGES[6])
     top = [(k["real"], "real 64 mT (scanner C)"), (k["rescan"], "rescan (scanner E, registered)")] + \
-          [(k["fakes"][s], f"fake {s}") for s in (G.STAGES[2], G.STAGES[3], G.STAGES[5])]
+          [(k["fakes"][s], f"fake {s}") for s in (G.STAGES[4], G.STAGES[5], G.STAGES[6])]
     bottom = [(k["real"] - k["rescan"], "real - rescan: the target")] + \
              [(k["real"] - k["fakes"][s], f"real - fake {s}") for s in show]
     for a, (im, title) in zip(ax[0], top):
@@ -121,7 +122,7 @@ def fig_summary(rows, out, plt):
     ax[0].legend(fontsize=8)
     ax[0].grid(axis="x", visible=False)
     from noise_report import AQUA
-    for i, st in enumerate((G.STAGES[1], G.STAGES[2], G.STAGES[3], G.STAGES[4])):
+    for i, st in enumerate((G.STAGES[1], G.STAGES[3], G.STAGES[4], G.STAGES[5])):
         med = [np.median(g(f"bias_{st}_{n}")) * 100 for n in QUARTERS]
         ax[1].plot(range(4), med, marker="o", ms=5, color=(MUTED, "#c9c8c2", AQUA, ORANGE)[i], label=f"fake {st}")
     med = [np.median(g(f"bias_rescan_{n}")) * 100 for n in QUARTERS]

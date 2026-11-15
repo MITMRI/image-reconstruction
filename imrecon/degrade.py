@@ -18,7 +18,11 @@
                    signals, as it does in the scanner, instead of 3 T intensities
     2c fitted      the same fractions, with each tissue's 64 mT signal taken from another 64 mT scan of the same person
                    (tissue_signals: class means). Scalp is a fifth tissue, because the 3 T scan is fat-suppressed
-    3 noise        on 2c: Student-t (nu = 10), blurred in-plane by `smoothing_px`, SD = white matter / `snr` (the measured medians:
+    2d T1w labels  as 2c, but grey matter, white matter and dark tissue from the 3 T T1w scan (MPRAGE, registered
+                   onto the T2w), where white matter is bright, grey matter between and CSF dark, and iron does not
+                   darken deep grey matter as it does on 3 T T2w. The T2w then splits the dark part: bright on T2w is
+                   CSF, dark on both is bone or air
+    3 noise        on 2d (2c without a T1w): Student-t (nu = 10), blurred in-plane by `smoothing_px`, SD = white matter / `snr` (the measured medians:
                    SNR 8.3 from rescans, 0.6 px); the air outside the head is set to 0, as Hyperfine's masking leaves it
 
 The noise is the best-fitting family from the rescan differences, Student-t with nu = 10 (a Gaussian is within
@@ -34,7 +38,7 @@ SNR = 8.3
 SMOOTHING_PX = 0.6
 NU = 10                                              # Student-t: best family in most 64 mT rescan pairs
 STAGES = ("0 resampled", "1 + resolution", "2a + contrast: map", "2b + contrast: physics", "2c + contrast: fitted",
-          "3 + noise")
+          "2d + contrast: T1w labels", "3 + noise")
 TR_S, TE_S = 2.0, 0.161                              # Hyperfine T2w in ds006557
 PD = {"wm": 0.685, "gm": 0.815, "csf": 0.975}        # mid-range proton densities, as lowfield-sim draws them
 T1T2_50MT = {"wm": (0.275, 0.102), "gm": (0.327, 0.102), "csf": (3.695, 1.584)}   # O'Reilly & Webb 2022
@@ -185,10 +189,46 @@ def tissue_fractions(x, voxel_mm):
     return f
 
 
-def blurred_fractions(high, low_grid, t, inplane=1.0, slab=1.0):
-    """Tissue fractions of the 3 T image, blurred to the 64 mT voxel and resampled with transform t."""
+def kmeans_1d(v, k, init):
+    c = np.percentile(v, init)
+    for _ in range(50):
+        lab = np.argmin(np.abs(v[:, None] - c[None]), 1)
+        c = np.array([v[lab == i].mean() if np.any(lab == i) else c[i] for i in range(k)])
+    return np.sort(c)
+
+
+def tissue_fractions_t1(t2, t1, voxel_mm):
+    """{tissue: fraction map} from a T1w volume t1 on the grid of the T2w volume t2: CSF, grey and white matter means
+    from three k-means classes of the T1w brain, each voxel split linearly between neighbouring means (below the CSF
+    mean all 'dark', above white matter all white matter); the dark part is CSF in proportion to T2w brightness
+    (up to the T2w CSF mean) and bone or air for the rest. Scalp as in tissue_fractions."""
+    brain = N.white_matter(t2, voxel_mm)[0]
+    dark, gm, wm = kmeans_1d(t1[brain], 3, [10, 45, 80])
+    csf_t2 = kmeans_1d(t2[brain], 3, [20, 50, 95])[-1]
+    x = np.clip(t1, dark, wm)
+    f_gm = np.where(x <= gm, (x - dark) / (gm - dark), (wm - x) / (wm - gm))
+    f_wm = np.where(x > gm, (x - gm) / (wm - gm), 0.0)
+    f_dark = np.where(x <= gm, (gm - x) / (gm - dark), 0.0)
+    share = np.clip(t2 / csf_t2, 0, 1)
+    head = N.head_mask(t2)
+    f = {"wm": f_wm * head, "gm": f_gm * head, "csf": f_dark * share * head}
+    base = tissue_fractions(t2, voxel_mm)
+    f["scalp"] = base["scalp"]
+    for k in ("wm", "gm", "csf"):
+        f[k][f["scalp"] > 0] = 0
+    return f
+
+
+def blurred_fractions(high, low_grid, t, inplane=1.0, slab=1.0, t1=None):
+    """Tissue fractions of the 3 T image (from T2w alone, or with a T1w SimpleITK image on any grid), blurred to the
+    64 mT voxel and resampled with transform t."""
     import SimpleITK as sitk
-    f = tissue_fractions(N.to_array(high), high.GetSpacing())
+    if t1 is None:
+        f = tissue_fractions(N.to_array(high), high.GetSpacing())
+    else:
+        # same session, same scanner coordinates: resample, do not register (a correlation-picked registration
+        # between inverted contrasts chose a 3.5 mm shift)
+        f = tissue_fractions_t1(N.to_array(high), resample(t1, high, sitk.Euler3DTransform()), high.GetSpacing())
     out = {}
     for name in ("wm", "gm", "csf", "scalp"):
         img = sitk.GetImageFromArray(f[name].transpose(2, 1, 0).astype(np.float32))
@@ -214,7 +254,7 @@ def tissue_signals(ref, brain, scalp):
             "scalp": ref[scalp].mean() if scalp.any() else c[order[0]]}
 
 
-def stages(high, low_grid, contrast_from, wm, snr=SNR, smoothing_px=SMOOTHING_PX, seed=0):
+def stages(high, low_grid, contrast_from, wm, snr=SNR, smoothing_px=SMOOTHING_PX, seed=0, t1=None):
     """({stage: fake 64 mT array}, Dice of the fake's and the grid's head masks) for 3 T image `high` on SimpleITK
     image `low_grid`'s grid, with contrast learned from `contrast_from` (another 64 mT scan of the same person) and
     white-matter mask `wm` on the low grid. Every stage is scaled to that scan's white matter."""
@@ -239,7 +279,13 @@ def stages(high, low_grid, contrast_from, wm, snr=SNR, smoothing_px=SMOOTHING_PX
     scale = lambda x: x * ref[wm].mean() / x[wm].mean() * head_res
     out = {STAGES[0]: scale(raw), STAGES[1]: scale(res), STAGES[2]: scale(con), STAGES[3]: scale(lit),
            STAGES[4]: scale(fitted)}
-    out[STAGES[5]] = add_noise(out[STAGES[4]], ref[wm].mean(), snr, smoothing_px, seed) * head_res
+    last = STAGES[4]
+    if t1 is not None:
+        fr1 = blurred_fractions(high, low_grid, t, t1=t1)
+        sig1 = tissue_signals(ref, deep & head_ref, fr1["scalp"] > 0.7)
+        out[STAGES[5]] = scale(sum(sig1[k] * fr1[k] for k in fr1))
+        last = STAGES[5]
+    out[STAGES[6]] = add_noise(out[last], ref[wm].mean(), snr, smoothing_px, seed=seed) * head_res
     grid_head = N.head_mask(N.to_array(low_grid))
     dice = 2 * np.sum(head_res & grid_head) / (head_res.sum() + grid_head.sum())
     return out, dice, {k: sig[k] / sig["wm"] for k in sig}

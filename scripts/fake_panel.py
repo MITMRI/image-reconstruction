@@ -35,7 +35,8 @@ def main(argv=None):
     c, e, g = (sitk.ReadImage(str(by[k]["path"]), sitk.sitkFloat32) for k in ("HFC", "HFE", "GE"))
     real = N.to_array(c)
     brain, wm, _ = N.white_matter(real, c.GetSpacing())
-    fakes, _, _ = G.stages(g, c, e, wm, seed=0)
+    t1 = Path(str(by["GE"]["path"]).replace("_ses-GE_T2w", "_ses-GE_acq-MPRAGE_T1w"))
+    fakes, _, _ = G.stages(g, c, e, wm, seed=0, t1=sitk.ReadImage(str(t1), sitk.sitkFloat32) if t1.is_file() else None)
     fake = fakes[G.STAGES[-1]]
     three = fakes[G.STAGES[0]]                                   # 3 T on the 64 mT grid, no blur
     t, _ = G.register_transform(c, e)
