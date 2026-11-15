@@ -16,12 +16,13 @@
                    given its 64 mT spin-echo signal PD (1 - exp(-TR/T1)) exp(-TE/T2) from the 50 mT table
                    (O'Reilly & Webb 2022) at the scan's TR and TE, then blurred and resampled. Partial volume now mixes
                    signals, as it does in the scanner, instead of 3 T intensities
-    2c fitted      the same fractions, with each tissue's 64 mT signal fitted by least squares to another 64 mT scan of
-                   the same person (the blurred fraction maps against it, in the brain)
-    3 noise        on 2c: Gaussian, blurred in-plane by `smoothing_px`, SD = white matter / `snr` (the measured medians:
+    2c fitted      the same fractions, with each tissue's 64 mT signal taken from another 64 mT scan of the same person
+                   (tissue_signals: class means). Scalp is a fifth tissue, because the 3 T scan is fat-suppressed
+    3 noise        on 2c: Student-t (nu = 10), blurred in-plane by `smoothing_px`, SD = white matter / `snr` (the measured medians:
                    SNR 8.3 from rescans, 0.6 px); the air outside the head is set to 0, as Hyperfine's masking leaves it
 
-The distribution fits found the noise near-Gaussian (Student-t, nu >= 10, worth 0.01 bits), so a Gaussian is used.
+The noise is the best-fitting family from the rescan differences, Student-t with nu = 10 (a Gaussian is within
+0.002-0.006 bits per voxel of it).
 """
 
 import numpy as np
@@ -31,6 +32,7 @@ from . import noise as N
 
 SNR = 8.3
 SMOOTHING_PX = 0.6
+NU = 10                                              # Student-t: best family in most 64 mT rescan pairs
 STAGES = ("0 resampled", "1 + resolution", "2a + contrast: map", "2b + contrast: physics", "2c + contrast: fitted",
           "3 + noise")
 TR_S, TE_S = 2.0, 0.161                              # Hyperfine T2w in ds006557
@@ -137,12 +139,14 @@ def piecewise(x, src, dst):
     return np.where(hi, d[-1] + (x - s[-1]) * (d[-1] - d[-2]) / max(s[-1] - s[-2], 1e-6), out)
 
 
-def add_noise(clean, wm_signal, snr=SNR, smoothing_px=SMOOTHING_PX, seed=0):
-    """clean + Gaussian noise of SD wm_signal / snr, blurred in-plane (axes 0 and 1) by smoothing_px pixels."""
-    n = np.random.default_rng(seed).normal(0, 1, clean.shape)
+def add_noise(clean, wm_signal, snr=SNR, smoothing_px=SMOOTHING_PX, nu=NU, seed=0):
+    """clean + noise of SD wm_signal / snr: Student-t with nu degrees of freedom (the best fit to 64 mT rescan
+    differences; None for Gaussian), blurred in-plane (axes 0 and 1) by smoothing_px pixels."""
+    rng = np.random.default_rng(seed)
+    n = rng.standard_t(nu, clean.shape) if nu else rng.normal(0, 1, clean.shape)
     if smoothing_px:
         n = ndi.gaussian_filter(n, (smoothing_px, smoothing_px, 0))
-        n /= n.std()
+    n /= n.std()
     return clean + (wm_signal / snr) * n
 
 
@@ -154,7 +158,8 @@ def spin_echo(tissue, tr=TR_S, te=TE_S):
 def tissue_fractions(x, voxel_mm):
     """{tissue: fraction map} of a T2w volume x: white matter, grey matter and CSF means from three k-means classes
     of the brain, air or bone at 0, and each voxel split linearly between the two neighbouring means (above the CSF
-    mean, all CSF; the scalp's fat lands there too)."""
+    mean, all CSF). Scalp is its own tissue: the head outside what Otsu's threshold calls head, found with a much
+    lower threshold, since the 3 T CUBE scan suppresses fat and leaves the scalp dark."""
     brain = N.white_matter(x, voxel_mm)[0]
     v = x[brain]
     c = np.percentile(v, [20, 50, 95])
@@ -163,7 +168,7 @@ def tissue_fractions(x, voxel_mm):
         c = np.array([v[lab == k].mean() for k in range(3)])
     anchors = np.concatenate([[0.0], np.sort(c)])
     names = ("air", "wm", "gm", "csf")
-    f = {n: np.zeros_like(x) for n in names}
+    f = {n: np.zeros_like(x) for n in names + ("scalp",)}
     xc = np.clip(x, 0, anchors[-1])
     for i in range(3):
         lo, hi = anchors[i], anchors[i + 1]
@@ -171,6 +176,12 @@ def tissue_fractions(x, voxel_mm):
         w = (xc[m] - lo) / (hi - lo)
         f[names[i]][m] += 1 - w
         f[names[i + 1]][m] += w
+    loose = ndi.binary_closing(x > 0.1 * anchors[1], iterations=3)
+    loose = np.stack([ndi.binary_fill_holes(loose[..., k]) for k in range(loose.shape[2])], -1)
+    scalp = loose & ~N.head_mask(x)
+    for n in names:
+        f[n][scalp] = 0
+    f["scalp"][scalp] = 1
     return f
 
 
@@ -179,11 +190,28 @@ def blurred_fractions(high, low_grid, t, inplane=1.0, slab=1.0):
     import SimpleITK as sitk
     f = tissue_fractions(N.to_array(high), high.GetSpacing())
     out = {}
-    for name in ("wm", "gm", "csf"):
+    for name in ("wm", "gm", "csf", "scalp"):
         img = sitk.GetImageFromArray(f[name].transpose(2, 1, 0).astype(np.float32))
         img.CopyInformation(high)
         out[name] = resample(slab_blur(img, low_grid, inplane, slab), low_grid, t)
     return out
+
+
+def tissue_signals(ref, brain, scalp):
+    """64 mT signal of each tissue, from another 64 mT scan `ref` of the same person: white matter, grey matter and
+    CSF as the means of four k-means classes of its brain (white matter the darkest holding a tenth of it, grey
+    matter the next, CSF the brightest; the third is grey matter and CSF mixed), the scalp as its mean where the
+    3 T scan puts scalp. Class means are not pulled toward each other the way a least-squares fit of overlapping
+    blurred fraction maps is (that fit gave grey matter = white matter)."""
+    v = ref[brain]
+    c = np.percentile(v, [5, 25, 55, 90])
+    for _ in range(50):
+        lab = np.argmin(np.abs(v[:, None] - c[None]), 1)
+        c = np.array([v[lab == k].mean() if np.any(lab == k) else c[k] for k in range(4)])
+    share = np.bincount(lab, minlength=4) / len(v)
+    order = [i for i in np.argsort(c) if share[i] >= 0.1 or c[i] == c.max()]
+    return {"wm": c[order[0]], "gm": c[order[1]], "csf": c.max(),
+            "scalp": ref[scalp].mean() if scalp.any() else c[order[0]]}
 
 
 def stages(high, low_grid, contrast_from, wm, snr=SNR, smoothing_px=SMOOTHING_PX, seed=0):
@@ -204,15 +232,14 @@ def stages(high, low_grid, contrast_from, wm, snr=SNR, smoothing_px=SMOOTHING_PX
         src, dst = paired_class_means(res, ref, both)
         con[region] = piecewise(res[region], src, dst)
     fr = blurred_fractions(high, low_grid, t)
-    lit = sum(spin_echo(k) * fr[k] for k in fr)
-    fit_mask = deep & head_ref
-    A = np.stack([fr[k][fit_mask] for k in fr], 1)
-    w = np.linalg.lstsq(A, ref[fit_mask], rcond=None)[0]
-    fitted = sum(wk * fr[k] for wk, k in zip(w, fr))
+    lit = sum(spin_echo(k) * fr[k] for k in ("wm", "gm", "csf"))
+    sig = tissue_signals(ref, deep & head_ref, fr["scalp"] > 0.7)
+    fitted = sum(sig[k] * fr[k] for k in fr)
+    lit = lit + fr["scalp"] * sig["scalp"] * spin_echo("wm") / sig["wm"]         # no scalp in the 50 mT table
     scale = lambda x: x * ref[wm].mean() / x[wm].mean() * head_res
     out = {STAGES[0]: scale(raw), STAGES[1]: scale(res), STAGES[2]: scale(con), STAGES[3]: scale(lit),
            STAGES[4]: scale(fitted)}
     out[STAGES[5]] = add_noise(out[STAGES[4]], ref[wm].mean(), snr, smoothing_px, seed) * head_res
     grid_head = N.head_mask(N.to_array(low_grid))
     dice = 2 * np.sum(head_res & grid_head) / (head_res.sum() + grid_head.sum())
-    return out, dice, dict(zip(fr, w / w[0]))
+    return out, dice, {k: sig[k] / sig["wm"] for k in sig}

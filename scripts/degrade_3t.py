@@ -145,13 +145,14 @@ def main(argv=None):
     ap.add_argument("root")
     ap.add_argument("--out", default="results")
     ap.add_argument("--show", default="sub-HYPE01")
+    ap.add_argument("--subjects", nargs="*", help="only these (default: all)")
     args = ap.parse_args(argv)
     scans = DS.ds006557(args.root)
     out = Path(args.out)
     (out / "figures").mkdir(parents=True, exist_ok=True)
     style(plt)
     rows = []
-    for sid in sorted({s["subject"] for s in scans}):
+    for sid in sorted({s["subject"] for s in scans if not args.subjects or s["subject"] in args.subjects}):
         by = {s["session"]: s for s in scans if s["subject"] == sid}
         keep = {} if sid == args.show else None
         r = {"subject": sid, **person(by, keep)}
@@ -174,7 +175,7 @@ def main(argv=None):
     print(f"  {'rescan':16s} bias by quarter (% WM) " + ", ".join(
         f"{np.median(g(f'bias_rescan_{n}')) * 100:+.0f}" for n in QUARTERS))
     print("  fitted 64 mT signal / white matter: " + ", ".join(
-        f"{k} {np.median(g(f'fitted_{k}_over_wm')):.2f}" for k in ("gm", "csf"))
+        f"{k} {np.median(g(f'fitted_{k}_over_wm')):.2f}" for k in ("gm", "csf", "scalp"))
           + "; literature: " + ", ".join(f"{k} {G.spin_echo(k) / G.spin_echo('wm'):.2f}" for k in ("gm", "csf")))
     print(f"  brain correlation with the real scan: rescan {med(g('rescan_corr'))}, fake {med(g('fake_corr'))}")
     print(f"  Laplacian SNR: real {med(g('snr_lap_real'))}, fake {med(g('snr_lap_fake'))}")

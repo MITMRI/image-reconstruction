@@ -95,16 +95,22 @@ registration). Ratio = SD(real − fake) / SD(real − rescan); 1 means as close
 | 0 resampled | 1.21 | 1.95 | +152 % of WM |
 | 1 + resolution (in-plane Gaussian, 5 mm slab box) | 1.16 | 1.84 | +156 % |
 | 2a + contrast: intensity map (paired class means) | 1.15 | 1.70 | +125 % |
-| 2b + contrast: physics, 50 mT table | 1.09 | 1.88 | +166 % |
-| 2c + contrast: physics, signals fitted to scanner E | 1.12 | 1.81 | +122 % |
-| 3 + noise model (on 2c) | 1.34 | 1.91 | +122 % |
+| 2b + contrast: physics, 50 mT table | 1.08 | 1.83 | +164 % |
+| 2c + contrast: physics, tissue signals from scanner E | 1.28 | 1.76 | +117 % |
+| 3 + noise model (Student-t ν = 10, on 2c) | 1.47 | 1.86 | +117 % |
 
-- **The noise matches**: the fake's Laplacian SNR is 20 against the real 18, and its spectrum is smoothed by 0.70 px
-  against 0.58.
+- **The noise matches**: the best-fit family (Student-t, ν = 10), SD from the rescans, smoothed 0.6 px. The fake's
+  Laplacian SNR is 20 against the real 18, its spectrum smoothed by 0.70 px against 0.58.
 - **Physics contrast**: tissue fractions from the 1 mm 3 T scan, a 64 mT spin-echo signal per tissue (TR 2 s, TE
   161 ms), then the blur, so partial volume mixes 64 mT signals. With the 50 mT literature T1/T2 it gives grey matter
-  1.19 and CSF 2.61 times white matter; fitted to the person's other 64 mT scan the signals are 1.40 and 4.46. The
-  literature values fit white matter best (1.09) but undersell CSF.
+  1.19 and CSF 2.61 times white matter; the person's other 64 mT scan gives 1.74 and 4.77 (class means; a
+  least-squares fit of the blurred fraction maps could not tell grey from white matter and gave 1.0). The scalp is
+  its own tissue (0.91 times white matter), because the 3 T CUBE scan is fat-suppressed.
+- **Deep grey matter is the clearest miss, and it is physics**: iron in the basal ganglia shortens T2 more at
+  high field, so those nuclei are dark at 3 T and not at 64 mT. Tissue classes from 3 T T2w intensity therefore call
+  them white-matter-like (fake 27 % too dark there in one person). Refining the registration on the same contrast made
+  the match worse, so alignment is not the cause. Next: tissue labels from the 3 T T1w scan, where iron does not
+  darken grey matter.
 - **What is still missing, in the brightest tissue** (CSF and cortex): the fake is far too dark there in every
   version. Less blur makes it worse, not better (brain ratio 1.80 → 1.93 from a full to no in-plane blur), so it is
   not the blur. Likely causes, visible in `11_fake_panel.png`: the 3 T CUBE scan is fat-suppressed (its scalp is
